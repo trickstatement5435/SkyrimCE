@@ -15,10 +15,13 @@ namespace ES
 
 	struct Config
 	{
-		bool  alignGrip = true;
-		float gripX = 0.0f, gripY = 0.0f, gripZ = 0.0f;  // nudge: across the blade, along the blade, up the handle
-		float twist = 0.0f;                              // degrees around the handle bar
-		float tilt = 0.0f;                               // degrees: tip the blades up (+) or down (-)
+		bool          alignGrip = true;
+		int           style = 1;  // 1 = Halo: blades out along the fist, bar across it. 0 = bar along the fist (first version)
+		float         gripX = 0.0f, gripY = 0.0f, gripZ = 0.0f;  // nudge: across the blade, along the blade, up the handle
+		float         twist = 0.0f;   // degrees: spin around the blade direction (which way the prongs point)
+		float         yaw = 0.0f;     // degrees: swing the blades left/right around the handle bar
+		float         tilt = 0.0f;    // degrees: tip the blades up (+) or down (-)
+		std::uint32_t reloadKey = 68; // F10: re-read the ini without restarting
 		bool  vanillaShockFX = true;                     // use vanilla's shock enchantment effect (lightning visuals)
 	};
 	inline Config cfg;
@@ -50,6 +53,9 @@ namespace ES
 				else if (key == "gripy") cfg.gripY = std::stof(val);
 				else if (key == "gripz") cfg.gripZ = std::stof(val);
 				else if (key == "twist") cfg.twist = std::stof(val);
+				else if (key == "yaw") cfg.yaw = std::stof(val);
+				else if (key == "style") cfg.style = std::stoi(val);
+				else if (key == "reloadkey") cfg.reloadKey = static_cast<std::uint32_t>(std::stoul(val));
 				else if (key == "tilt") cfg.tilt = std::stof(val);
 				else if (key == "vanillashockfx") cfg.vanillaShockFX = std::stoi(val) != 0;
 			} catch (...) {
@@ -173,20 +179,29 @@ namespace ES
 		auto pinkyTip = bone("NPC R Finger42 [RF42]");
 
 		const RE::NiPoint3 H = hand->world.translate, I = index->world.translate, M = middle->world.translate, P = pinky->world.translate;
-		RE::NiPoint3       g = Normalized(I - P);                 // the bar runs pinky -> index (top blade on the thumb side)
-		RE::NiPoint3       k = M - H;
-		k = Normalized(k - g * k.Dot(g));                          // blades point the way the knuckles face
-		RE::NiPoint3 center = (I + P) * 0.5f;                     // the bar sits inside the curled fingers
+		const RE::NiPoint3 fist = Normalized(I - P);              // along the knuckles, pinky -> index
+		RE::NiPoint3       knuckles = M - H;
+		knuckles = Normalized(knuckles - fist * knuckles.Dot(fist));  // the way the knuckles face
+		const RE::NiPoint3 across = Normalized(Cross(knuckles, fist));
+		RE::NiPoint3 center = (I + P) * 0.5f;                     // inside the curled fingers
 		if (indexTip && pinkyTip) {
 			center = (I + P + indexTip->world.translate + pinkyTip->world.translate) * 0.25f;
 		}
-		if (cfg.twist != 0.0f) k = Rotate(k, g, cfg.twist * 0.0174533f);
+		// blade direction B and handle-bar direction U
+		RE::NiPoint3 B = cfg.style == 0 ? knuckles : fist;
+		RE::NiPoint3 U = cfg.style == 0 ? fist : across;
+		constexpr float d2r = 0.0174533f;
+		if (cfg.twist != 0.0f) U = Rotate(U, B, cfg.twist * d2r);
+		if (cfg.yaw != 0.0f) B = Rotate(B, U, cfg.yaw * d2r);
 		if (cfg.tilt != 0.0f) {
-			const RE::NiPoint3 side = Normalized(Cross(k, g));
-			k = Rotate(k, side, cfg.tilt * 0.0174533f);
-			g = Rotate(g, side, cfg.tilt * 0.0174533f);
+			const RE::NiPoint3 side = Normalized(Cross(B, U));
+			B = Rotate(B, side, cfg.tilt * d2r);
+			U = Rotate(U, side, cfg.tilt * d2r);
 		}
-		const RE::NiPoint3 x = Normalized(Cross(k, g));
+		B = Normalized(B);
+		U = Normalized(U - B * U.Dot(B));
+		const RE::NiPoint3 x = Normalized(Cross(B, U));
+		const RE::NiPoint3 k = B, g = U;
 		// mesh axes: X across, Y along the blades, Z up the handle bar, origin at the grip
 		RE::NiMatrix3 R;
 		for (int r = 0; r < 3; ++r) {
@@ -218,6 +233,36 @@ namespace ES
 		AlignIn(player->Get3D(true));   // first person
 		AlignIn(player->Get3D(false));  // third person
 	}
+
+	static void Notify(const char* msg)
+	{
+		using func_t = void (*)(const char*, const char*, bool);
+		static REL::Relocation<func_t> func{ REL::RelocationID(52050, 52933) };
+		func(msg, nullptr, true);
+	}
+
+	// F10 (by default): re-read EnergySword.ini so the grip can be tuned while the game runs
+	class InputHandler : public RE::BSTEventSink<RE::InputEvent*>
+	{
+	public:
+		static InputHandler* Get()
+		{
+			static InputHandler instance;
+			return &instance;
+		}
+		RE::BSEventNotifyControl ProcessEvent(RE::InputEvent* const* a_event, RE::BSTEventSource<RE::InputEvent*>*) override
+		{
+			for (auto e = a_event ? *a_event : nullptr; e; e = e->next) {
+				auto button = e->AsButtonEvent();
+				if (!button || !button->IsDown() || button->GetDevice() != RE::INPUT_DEVICE::kKeyboard) continue;
+				if (button->GetIDCode() == cfg.reloadKey) {
+					LoadConfig();
+					Notify(std::format("Energy Sword ini reloaded (style {}, twist {}, yaw {}, tilt {})", cfg.style, cfg.twist, cfg.yaw, cfg.tilt).c_str());
+				}
+			}
+			return RE::BSEventNotifyControl::kContinue;
+		}
+	};
 
 	struct PlayerUpdateHook
 	{
@@ -261,6 +306,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
 	SKSE::GetMessagingInterface()->RegisterListener([](SKSE::MessagingInterface::Message* msg) {
 		if (msg->type == SKSE::MessagingInterface::kDataLoaded) {
 			ES::LookupForms();
+			RE::BSInputDeviceManager::GetSingleton()->AddEventSink(ES::InputHandler::Get());
 		}
 	});
 	return true;
