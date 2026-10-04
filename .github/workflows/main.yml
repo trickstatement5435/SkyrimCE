@@ -1,0 +1,69 @@
+name: Build Energy Sword
+
+on:
+  workflow_dispatch:   # run it by hand: Actions -> Build Energy Sword -> Run workflow
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find the project folder
+        shell: pwsh
+        run: |
+          $cml = Get-ChildItem -Path . -Recurse -Filter CMakeLists.txt -File |
+            Where-Object { (Get-Content $_.FullName -Raw) -match 'project\(EnergySword' } |
+            Select-Object -First 1
+          if (-not $cml) {
+            Write-Host "Could not find the Energy Sword CMakeLists.txt anywhere in the repo. Files at the top level:"
+            Get-ChildItem -Path . | Format-Table Name, Mode
+            exit 1
+          }
+          $dir = $cml.DirectoryName
+          Write-Host "Project folder: $dir"
+          "PROJ=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Set up vcpkg
+        shell: pwsh
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP/vcpkg"
+          & "$env:RUNNER_TEMP/vcpkg/bootstrap-vcpkg.bat" -disableMetrics
+          "VCPKG_ROOT=$env:RUNNER_TEMP/vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP/vcpkg-cache" | Out-Null
+          "VCPKG_DEFAULT_BINARY_CACHE=$env:RUNNER_TEMP/vcpkg-cache" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      # Reuse compiled libraries (spdlog, DirectXTK, ...) from earlier runs
+      - name: Cache vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg-cache
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('**/vcpkg.json') }}
+          restore-keys: vcpkg-${{ runner.os }}-
+
+      - name: Configure
+        shell: pwsh
+        run: >
+          cmake -S "$env:PROJ" -B "$env:PROJ/build" -A x64
+          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build "$env:PROJ/build" --config Release --parallel
+
+      - name: Package mod
+        shell: pwsh
+        run: |
+          $dist = "$env:GITHUB_WORKSPACE/dist"
+          New-Item -ItemType Directory -Force -Path "$dist/SKSE/Plugins" | Out-Null
+          Copy-Item "$env:PROJ/build/Release/EnergySword.dll" "$dist/SKSE/Plugins/"
+          Copy-Item "$env:PROJ/EnergySword.ini" "$dist/SKSE/Plugins/"
+          # Models/textures/sounds/.esp are pre-made files: include them only if they're in the repo
+          if (Test-Path "$env:PROJ/data") { Copy-Item -Recurse "$env:PROJ/data/*" "$dist/" }
+          Get-ChildItem -Recurse $dist | Select-Object FullName
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EnergySword-mod
+          path: dist
