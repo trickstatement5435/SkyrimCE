@@ -24,9 +24,14 @@ for line in open(obj):
     elif p[0] == 'f' and g == '__unnamed':
         faces.append([tuple(int(i) - 1 for i in c.split('/')) for c in p[1:]])
 V, VT, VN = np.array(V), np.array(VT), np.array(VN)
-R = lambda a: np.stack([-a[..., 1], a[..., 0], a[..., 2]], -1)
+# Halo -> NIF as before, then turned so the side of the blade faces you in first person:
+# the hand's default grip had the blades pointing straight away from the camera (seen end-on).
+# Cyclic axis turn (x, y, z) -> (z, x, y): blades now run across the view, the handle bar stands up.
+R0 = lambda a: np.stack([-a[..., 1], a[..., 0], a[..., 2]], -1)
+R = lambda a: (lambda b: np.stack([b[..., 2], b[..., 0], b[..., 1]], -1))(R0(a))
 
 verts, tris, shell_verts, shell_tris = [], [], [], []
+blade_verts, blade_tris = [], []
 flips = 0
 for f in faces:
     for k in range(1, len(f) - 1):
@@ -36,10 +41,12 @@ for f in faces:
         T = VT[[c[1] for c in tri]].copy(); T[:, 1] = 1.0 - T[:, 1]
         if np.dot(np.cross(P[1] - P[0], P[2] - P[0]), N.sum(0)) < 0:  # make winding agree with the normals
             tri = tri[::-1]; P = P[::-1]; N = N[::-1]; T = T[::-1]; flips += 1
-        i = len(verts)
-        for j in range(3): verts.append((*P[j], *N[j], *T[j]))
-        tris.append((i, i + 1, i + 2))
-        if T[:, 1].mean() > 0.5:  # blue part of the atlas = the energy blade -> glow shell
+        is_blade = T[:, 1].mean() > 0.5  # blue part of the atlas = the energy blade
+        dst_v, dst_t = (blade_verts, blade_tris) if is_blade else (verts, tris)
+        i = len(dst_v)
+        for j in range(3): dst_v.append((*P[j], *N[j], *T[j]))
+        dst_t.append((i, i + 1, i + 2))
+        if is_blade:  # plus a slightly larger glow shell
             i = len(shell_verts)
             for j in range(3): shell_verts.append((*(P[j] + N[j] * SHELL), *N[j], *T[j]))
             shell_tris.append((i, i + 1, i + 2))
@@ -50,9 +57,10 @@ def save(path, vs, ts):
         for v in vs: fh.write(struct.pack('<8f', *v))
         for t in ts: fh.write(struct.pack('<3H', *t))
     print(path, len(vs), 'verts', len(ts), 'tris')
-save(f'{bin_dir}/sword.bin', verts, tris)
+save(f'{bin_dir}/sword.bin', verts, tris)        # the handle (solid metal)
+save(f'{bin_dir}/blade.bin', blade_verts, blade_tris)  # the energy blades (translucent)
 save(f'{bin_dir}/shell.bin', shell_verts, shell_tris)
-P = np.array([v[:3] for v in verts]); print('flipped', flips, 'bbox', P.min(0).round(1), P.max(0).round(1))
+P = np.array([v[:3] for v in verts + blade_verts]); print('flipped', flips, 'bbox', P.min(0).round(1), P.max(0).round(1))
 
 # textures: 128px Halo atlas upscaled; top half = handle metal, bottom half = blade energy
 img = Image.open(png).convert('RGBA').resize((512, 512), Image.LANCZOS)
@@ -69,4 +77,9 @@ write_dds(f'{tex_dir}/energysword_n.dds', n)
 # soft glow for the halo shell: the blade colors, bright
 halo = np.zeros_like(a); halo[256:, :, :3] = np.clip(a[256:, :, :3] * 0.6 + np.array([0.2, 0.55, 1.0]) * 0.6, 0, 1); halo[..., 3] = 1.0
 write_dds(f'{tex_dir}/energysword_halo.dds', (halo * 255).astype(np.uint8))
+# translucent energy: brightness of the blade texture, used with additive blending and a rim falloff
+energy = np.zeros_like(a); energy[..., 3] = 1.0
+lum = a[256:, :, :3].mean(-1, keepdims=True)
+energy[256:, :, :3] = np.clip(0.35 + 0.9 * lum, 0, 1) * np.array([0.75, 0.92, 1.0])
+write_dds(f'{tex_dir}/energysword_blade.dds', (energy * 255).astype(np.uint8))
 print('textures ok')

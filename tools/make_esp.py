@@ -45,7 +45,7 @@ ench = record('ENCH', ID_ENCH, [
     sub('ENIT', struct.pack('<iIIiIIfII', 0, 0x1, 1, 0, 1, 0x06, 0.0, 0, 0)),  # cost 0 (never drains), no auto-calc, FF, contact
     sub('EFID', struct.pack('<I', ID_MGEF)), sub('EFIT', struct.pack('<fII', SHOCK_DAMAGE, 0, 0)),
 ])
-stat = record('STAT', ID_STAT, [sub('EDID', zstr('EnergySwordFirstPerson')), obnd(-3, -12, -12, 3, 61, 15),
+stat = record('STAT', ID_STAT, [sub('EDID', zstr('EnergySwordFirstPerson')), obnd(-12, -3, -11, 15, 3, 61),
                                 sub('MODL', zstr('EnergySword\\energysword.nif')), sub('DNAM', struct.pack('<fI', 90.0, 0))])
 dnam = struct.pack('<B3sffHHf4sBBBBffIIfffffff4si8si4sf',
     1, b'\0' * 3,      # animation: one-hand sword
@@ -58,7 +58,7 @@ dnam = struct.pack('<B3sffHHf4sBBBBffIIfffffff4si8si4sf',
 assert len(dnam) == 100
 crdt = struct.pack('<HHfB7sII', 12, 0, 1.0, 0, b'\0' * 7, 0, 0)
 weap = record('WEAP', ID_WEAP, [
-    sub('EDID', zstr('EnergySword')), obnd(-3, -12, -12, 3, 61, 15), sub('FULL', zstr('Energy Sword')),
+    sub('EDID', zstr('EnergySword')), obnd(-12, -3, -11, 15, 3, 61), sub('FULL', zstr('Energy Sword')),
     sub('MODL', zstr('EnergySword\\energysword.nif')),
     sub('EITM', struct.pack('<I', ID_ENCH)), sub('EAMT', struct.pack('<H', 3000)),
     sub('ETYP', struct.pack('<I', EQUP_EITHER_HAND)),

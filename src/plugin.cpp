@@ -16,7 +16,8 @@ namespace ES
 	struct Config
 	{
 		bool          alignGrip = true;
-		int           style = 1;  // 1 = Halo: blades out along the fist, bar across it. 0 = bar along the fist (first version)
+		int           style = 0;  // 0 = turn the sword relative to where Skyrim puts it (default)
+		                          // 1 = rebuild the grip from the finger bones, Halo style; 2 = finger bones, bar along the fist
 		float         gripX = 0.0f, gripY = 0.0f, gripZ = 0.0f;  // nudge: across the blade, along the blade, up the handle
 		float         twist = 0.0f;   // degrees: spin around the blade direction (which way the prongs point)
 		float         yaw = 0.0f;     // degrees: swing the blades left/right around the handle bar
@@ -160,14 +161,60 @@ namespace ES
 		return v * c + Cross(axis, v) * s + axis * (axis.Dot(v) * (1.0f - c));
 	}
 
-	static void AlignIn(RE::NiAVObject* root)
+	static RE::NiMatrix3 AxisAngle(const RE::NiPoint3& axis, float rad)
 	{
-		if (!root) return;
-		auto node = root->GetObjectByName(RE::BSFixedString(kRootName));
+		const RE::NiPoint3 cols[3] = { Rotate({ 1, 0, 0 }, axis, rad), Rotate({ 0, 1, 0 }, axis, rad), Rotate({ 0, 0, 1 }, axis, rad) };
+		RE::NiMatrix3      m;
+		for (int c = 0; c < 3; ++c)
+			for (int r = 0; r < 3; ++r) m.entry[r][c] = (&cols[c].x)[r];
+		return m;
+	}
+	static RE::NiMatrix3 Mul(const RE::NiMatrix3& a, const RE::NiMatrix3& b)
+	{
+		RE::NiMatrix3 r;
+		for (int i = 0; i < 3; ++i)
+			for (int j = 0; j < 3; ++j) r.entry[i][j] = a.entry[i][0] * b.entry[0][j] + a.entry[i][1] * b.entry[1][j] + a.entry[i][2] * b.entry[2][j];
+		return r;
+	}
+
+	// The sword model Skyrim attached under the hand's WEAPON node (found by structure, not by name:
+	// the game renames attached weapon models)
+	static RE::NiAVObject* SwordNode(RE::NiAVObject* root)
+	{
+		auto weaponNode = root ? root->GetObjectByName(RE::BSFixedString("WEAPON")) : nullptr;
+		auto node = weaponNode ? weaponNode->AsNode() : nullptr;
+		if (!node) return nullptr;
+		for (auto& child : node->GetChildren()) {
+			if (child && child->AsNode()) return child.get();
+		}
+		return nullptr;
+	}
+
+	inline std::unordered_map<RE::NiAVObject*, RE::NiTransform> baseLocal;
+	inline bool loggedFind[2]{};
+
+	static void AlignIn(RE::NiAVObject* root, int which)
+	{
+		auto node = SwordNode(root);
+		if (!loggedFind[which]) {
+			loggedFind[which] = true;
+			SKSE::log::info("{} person: sword node {}", which ? "third" : "first", node ? node->name.c_str() : "NOT FOUND");
+		}
 		if (!node || !node->parent) return;
-		// only while it's in the hand (the right-hand WEAPON node), not sheathed on the hip
-		const char* parentName = node->parent->name.c_str();
-		if (!parentName || std::string_view(parentName) != "WEAPON") return;
+		constexpr float d2r = 0.0174533f;
+
+		if (cfg.style == 0) {
+			// turn/slide relative to where Skyrim placed it. Mesh axes: X = handle bar, Y = across, Z = blades
+			auto it = baseLocal.find(node);
+			if (it == baseLocal.end()) it = baseLocal.emplace(node, node->local).first;
+			const auto& base = it->second;
+			const RE::NiMatrix3 delta = Mul(Mul(AxisAngle({ 1, 0, 0 }, cfg.yaw * d2r), AxisAngle({ 0, 0, 1 }, cfg.twist * d2r)), AxisAngle({ 0, 1, 0 }, cfg.tilt * d2r));
+			node->local.rotate = Mul(base.rotate, delta);
+			node->local.translate = base.translate + base.rotate * RE::NiPoint3{ cfg.gripX, cfg.gripY, cfg.gripZ };
+			RE::NiUpdateData ud;
+			node->Update(ud);
+			return;
+		}
 
 		auto bone = [&](const char* n) { return root->GetObjectByName(RE::BSFixedString(n)); };
 		auto hand = bone("NPC R Hand [RHnd]");
@@ -177,20 +224,15 @@ namespace ES
 		if (!hand || !index || !middle || !pinky) return;
 		auto indexTip = bone("NPC R Finger12 [RF12]");
 		auto pinkyTip = bone("NPC R Finger42 [RF42]");
-
 		const RE::NiPoint3 H = hand->world.translate, I = index->world.translate, M = middle->world.translate, P = pinky->world.translate;
-		const RE::NiPoint3 fist = Normalized(I - P);              // along the knuckles, pinky -> index
+		const RE::NiPoint3 fist = Normalized(I - P);
 		RE::NiPoint3       knuckles = M - H;
-		knuckles = Normalized(knuckles - fist * knuckles.Dot(fist));  // the way the knuckles face
+		knuckles = Normalized(knuckles - fist * knuckles.Dot(fist));
 		const RE::NiPoint3 across = Normalized(Cross(knuckles, fist));
-		RE::NiPoint3 center = (I + P) * 0.5f;                     // inside the curled fingers
-		if (indexTip && pinkyTip) {
-			center = (I + P + indexTip->world.translate + pinkyTip->world.translate) * 0.25f;
-		}
-		// blade direction B and handle-bar direction U
-		RE::NiPoint3 B = cfg.style == 0 ? knuckles : fist;
-		RE::NiPoint3 U = cfg.style == 0 ? fist : across;
-		constexpr float d2r = 0.0174533f;
+		RE::NiPoint3       center = (I + P) * 0.5f;
+		if (indexTip && pinkyTip) center = (I + P + indexTip->world.translate + pinkyTip->world.translate) * 0.25f;
+		RE::NiPoint3 B = cfg.style == 2 ? knuckles : fist;   // blades
+		RE::NiPoint3 U = cfg.style == 2 ? fist : across;     // handle bar
 		if (cfg.twist != 0.0f) U = Rotate(U, B, cfg.twist * d2r);
 		if (cfg.yaw != 0.0f) B = Rotate(B, U, cfg.yaw * d2r);
 		if (cfg.tilt != 0.0f) {
@@ -200,23 +242,18 @@ namespace ES
 		}
 		B = Normalized(B);
 		U = Normalized(U - B * U.Dot(B));
-		const RE::NiPoint3 x = Normalized(Cross(B, U));
-		const RE::NiPoint3 k = B, g = U;
-		// mesh axes: X across, Y along the blades, Z up the handle bar, origin at the grip
-		RE::NiMatrix3 R;
+		const RE::NiPoint3 Y = Normalized(Cross(B, U));
+		RE::NiMatrix3 R;  // mesh X = bar, Y = across, Z = blades
 		for (int r = 0; r < 3; ++r) {
-			R.entry[r][0] = (&x.x)[r];
-			R.entry[r][1] = (&k.x)[r];
-			R.entry[r][2] = (&g.x)[r];
+			R.entry[r][0] = (&U.x)[r];
+			R.entry[r][1] = (&Y.x)[r];
+			R.entry[r][2] = (&B.x)[r];
 		}
-		const RE::NiPoint3 pos = center + x * cfg.gripX + k * cfg.gripY + g * cfg.gripZ;
-
-		const auto& pw = node->parent->world;
 		RE::NiTransform desired;
 		desired.rotate = R;
-		desired.translate = pos;
+		desired.translate = center + U * cfg.gripX + Y * cfg.gripY + B * cfg.gripZ;
 		desired.scale = node->world.scale;
-		RE::NiTransform local = pw.Invert() * desired;
+		RE::NiTransform local = node->parent->world.Invert() * desired;
 		local.scale = node->local.scale;
 		node->local = local;
 		RE::NiUpdateData ud;
@@ -227,11 +264,14 @@ namespace ES
 	{
 		if (!cfg.alignGrip || !sword) return;
 		auto player = RE::PlayerCharacter::GetSingleton();
-		if (!player || !player->AsActorState()->IsWeaponDrawn()) return;
+		if (!player || !player->AsActorState()->IsWeaponDrawn()) {
+			baseLocal.clear();  // re-drawn swords are fresh nodes
+			return;
+		}
 		auto right = player->GetEquippedObject(false);
 		if (right != sword) return;
-		AlignIn(player->Get3D(true));   // first person
-		AlignIn(player->Get3D(false));  // third person
+		AlignIn(player->Get3D(true), 0);   // first person
+		AlignIn(player->Get3D(false), 1);  // third person
 	}
 
 	static void Notify(const char* msg)

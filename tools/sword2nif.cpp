@@ -1,8 +1,9 @@
 // Builds EnergySword.nif for Skyrim SE with nifly:
-//   EnergySwordMesh  the sword (glow-mapped: the blade glows, the handle doesn't)
-//   EnergySwordHalo  an additive glow shell around the blade
+//   EnergySwordMesh   the handle (lit metal)
+//   EnergySwordBlade  the energy blades: unlit, additive, see-through, edges brighter than the faces
+//   EnergySwordHalo   a soft additive glow shell around the blades
 //   box collision (so it can lie on the ground), Prn = WeaponSword (hip sheath node)
-// usage: sword2nif sword.bin shell.bin out.nif
+// usage: sword2nif handle.bin blade.bin shell.bin out.nif
 #include "NifFile.hpp"
 #include "bhk.hpp"
 #include "ExtraData.hpp"
@@ -60,21 +61,23 @@ static void AddSword(NifFile& nif, const Mesh& m)
 	}
 }
 
-static void AddHalo(NifFile& nif, const Mesh& m)
+// Unlit additive energy surface. rimBright = edges glow brighter than the faces (holographic look);
+// otherwise faces glow and edges fade (soft outer halo).
+static void AddEnergy(NifFile& nif, const Mesh& m, const char* name, const char* tex, bool rimBright, float scale)
 {
-	NiShape* shape = nif.CreateShapeFromData("EnergySwordHalo", &m.verts, &m.tris, &m.uvs, &m.norms);
+	NiShape* shape = nif.CreateShapeFromData(name, &m.verts, &m.tris, &m.uvs, &m.norms);
 	auto& hdr = nif.GetHeader();
 	// swap the default lighting shader for an unlit additive effect shader
 	auto fx = std::make_unique<BSEffectShaderProperty>();
 	fx->shaderFlags1 = SLSF1_ZBUFFER_TEST | SLSF1_USE_FALLOFF;
 	fx->shaderFlags2 = SLSF2_DOUBLE_SIDED;
-	fx->sourceTexture.get() = "textures\\EnergySword\\energysword_halo.dds";
-	fx->baseColor = Color4(0.45f, 0.8f, 1.0f, 1.0f);
-	fx->baseColorScale = 1.6f;
-	fx->falloffStartAngle = 1.0f;
-	fx->falloffStopAngle = 0.0f;
-	fx->falloffStartOpacity = 0.9f;
-	fx->falloffStopOpacity = 0.0f;
+	fx->sourceTexture.get() = tex;
+	fx->baseColor = Color4(0.5f, 0.82f, 1.0f, 1.0f);
+	fx->baseColorScale = scale;
+	fx->falloffStartAngle = 1.0f;   // facing the camera
+	fx->falloffStopAngle = 0.0f;    // edge-on
+	fx->falloffStartOpacity = rimBright ? 0.35f : 0.9f;
+	fx->falloffStopOpacity = rimBright ? 1.0f : 0.0f;
 	fx->textureClampMode = 3;
 	const uint32_t old = shape->ShaderPropertyRef()->index;
 	hdr.ReplaceBlock(old, std::move(fx));
@@ -144,24 +147,32 @@ static void AddCollision(NifFile& nif, const Mesh& m)
 int main(int argc, char** argv)
 {
 	if (argc < 4) {
-		std::printf("usage: sword2nif sword.bin shell.bin out.nif\n");
+		std::printf("usage: sword2nif handle.bin blade.bin shell.bin out.nif\n");
+		return 1;
+	}
+	if (argc < 5) {
+		std::printf("usage: sword2nif handle.bin blade.bin shell.bin out.nif\n");
 		return 1;
 	}
 	const Mesh sword = LoadMesh(argv[1]);
-	const Mesh shell = LoadMesh(argv[2]);
+	const Mesh blade = LoadMesh(argv[2]);
+	const Mesh shell = LoadMesh(argv[3]);
 	NifFile nif;
 	nif.Create(NiVersion::getSSE());
 	auto fade = std::make_unique<BSFadeNode>();
 	fade->name.get() = "EnergySword";
 	nif.GetHeader().ReplaceBlock(0, std::move(fade));
 	AddSword(nif, sword);
-	AddHalo(nif, shell);
-	AddCollision(nif, sword);
+	AddEnergy(nif, blade, "EnergySwordBlade", "textures\\EnergySword\\energysword_blade.dds", true, 2.2f);
+	AddEnergy(nif, shell, "EnergySwordHalo", "textures\\EnergySword\\energysword_halo.dds", false, 1.4f);
+	Mesh all = sword;
+	all.verts.insert(all.verts.end(), blade.verts.begin(), blade.verts.end());
+	AddCollision(nif, all);
 	nif.PrettySortBlocks();
-	if (nif.Save(argv[3]) != 0) return 1;
+	if (nif.Save(argv[4]) != 0) return 1;
 	NifFile check;
-	if (check.Load(argv[3]) != 0) return 1;
-	std::printf("%s: %zu shapes, %u blocks\n", argv[3], check.GetShapes().size(), check.GetHeader().GetNumBlocks());
+	if (check.Load(argv[4]) != 0) return 1;
+	std::printf("%s: %zu shapes, %u blocks\n", argv[4], check.GetShapes().size(), check.GetHeader().GetNumBlocks());
 	for (auto s : check.GetShapes()) {
 		auto sh = check.GetShader(s);
 		std::printf("  %s shader %s alpha %d\n", s->name.get().c_str(), sh ? sh->GetBlockName() : "-", check.GetAlphaProperty(s) ? 1 : 0);
