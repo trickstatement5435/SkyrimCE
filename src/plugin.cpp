@@ -16,13 +16,15 @@ namespace ES
 	struct Config
 	{
 		bool          alignGrip = true;
-		int           style = 0;  // 0 = turn the sword relative to where Skyrim puts it (default)
+		int           style = 1;  // 0 = turn the sword relative to where Skyrim puts it (default)
 		                          // 1 = rebuild the grip from the finger bones, Halo style; 2 = finger bones, bar along the fist
 		float         gripX = 0.0f, gripY = 0.0f, gripZ = 0.0f;  // nudge: across the blade, along the blade, up the handle
-		float         twist = 0.0f;   // degrees: spin around the blade direction (which way the prongs point)
-		float         yaw = 0.0f;     // degrees: swing the blades left/right around the handle bar
-		float         tilt = 0.0f;    // degrees: tip the blades up (+) or down (-)
+		float         twist = 90.0f;   // degrees: spin around the blade direction (which way the prongs point)
+		float         yaw = 180.0f;    // degrees: swing the blades left/right around the handle bar
+		float         tilt = 90.0f;   // degrees: tip the blades up (+) or down (-)
 		std::uint32_t reloadKey = 68; // F10: re-read the ini without restarting
+		float         raise = 5.0f;   // first person: lift your arms (and the sword) this many units
+		float         forward = 0.0f; // first person: push them forward
 		bool  vanillaShockFX = true;                     // use vanilla's shock enchantment effect (lightning visuals)
 	};
 	inline Config cfg;
@@ -55,6 +57,8 @@ namespace ES
 				else if (key == "gripz") cfg.gripZ = std::stof(val);
 				else if (key == "twist") cfg.twist = std::stof(val);
 				else if (key == "yaw") cfg.yaw = std::stof(val);
+				else if (key == "raise") cfg.raise = std::stof(val);
+				else if (key == "forward") cfg.forward = std::stof(val);
 				else if (key == "style") cfg.style = std::stoi(val);
 				else if (key == "reloadkey") cfg.reloadKey = static_cast<std::uint32_t>(std::stoul(val));
 				else if (key == "tilt") cfg.tilt = std::stof(val);
@@ -179,9 +183,10 @@ namespace ES
 
 	// The sword model Skyrim attached under the hand's WEAPON node (found by structure, not by name:
 	// the game renames attached weapon models)
-	static RE::NiAVObject* SwordNode(RE::NiAVObject* root)
+	static RE::NiAVObject* SwordNode(RE::NiAVObject* root, bool left)
 	{
-		auto weaponNode = root ? root->GetObjectByName(RE::BSFixedString("WEAPON")) : nullptr;
+		// right hand weapons hang under WEAPON, left hand ones under SHIELD
+		auto weaponNode = root ? root->GetObjectByName(RE::BSFixedString(left ? "SHIELD" : "WEAPON")) : nullptr;
 		auto node = weaponNode ? weaponNode->AsNode() : nullptr;
 		if (!node) return nullptr;
 		for (auto& child : node->GetChildren()) {
@@ -191,14 +196,14 @@ namespace ES
 	}
 
 	inline std::unordered_map<RE::NiAVObject*, RE::NiTransform> baseLocal;
-	inline bool loggedFind[2]{};
+	inline bool loggedFind[4]{};
 
-	static void AlignIn(RE::NiAVObject* root, int which)
+	static void AlignIn(RE::NiAVObject* root, int which, bool left)
 	{
-		auto node = SwordNode(root);
-		if (!loggedFind[which]) {
-			loggedFind[which] = true;
-			SKSE::log::info("{} person: sword node {}", which ? "third" : "first", node ? node->name.c_str() : "NOT FOUND");
+		auto node = SwordNode(root, left);
+		if (!loggedFind[which * 2 + left]) {
+			loggedFind[which * 2 + left] = true;
+			SKSE::log::info("{} person, {} hand: sword node {}", which ? "third" : "first", left ? "left" : "right", node ? node->name.c_str() : "NOT FOUND");
 		}
 		if (!node || !node->parent) return;
 		constexpr float d2r = 0.0174533f;
@@ -216,7 +221,14 @@ namespace ES
 			return;
 		}
 
-		auto bone = [&](const char* n) { return root->GetObjectByName(RE::BSFixedString(n)); };
+		auto bone = [&](const char* rightName) {
+			std::string n = rightName;
+			if (left) {  // "NPC R Hand [RHnd]" -> "NPC L Hand [LHnd]"
+				n.replace(n.find(" R "), 3, " L ");
+				n.replace(n.find("[R"), 2, "[L");
+			}
+			return root->GetObjectByName(RE::BSFixedString(n.c_str()));
+		};
 		auto hand = bone("NPC R Hand [RHnd]");
 		auto index = bone("NPC R Finger10 [RF10]");
 		auto middle = bone("NPC R Finger20 [RF20]");
@@ -224,25 +236,27 @@ namespace ES
 		if (!hand || !index || !middle || !pinky) return;
 		auto indexTip = bone("NPC R Finger12 [RF12]");
 		auto pinkyTip = bone("NPC R Finger42 [RF42]");
+		// the left hand is a mirror image: flip the across-the-fist axis and the turning direction
+		const float mirror = left ? -1.0f : 1.0f;
 		const RE::NiPoint3 H = hand->world.translate, I = index->world.translate, M = middle->world.translate, P = pinky->world.translate;
 		const RE::NiPoint3 fist = Normalized(I - P);
 		RE::NiPoint3       knuckles = M - H;
 		knuckles = Normalized(knuckles - fist * knuckles.Dot(fist));
-		const RE::NiPoint3 across = Normalized(Cross(knuckles, fist));
+		const RE::NiPoint3 across = Normalized(Cross(knuckles, fist)) * mirror;
 		RE::NiPoint3       center = (I + P) * 0.5f;
 		if (indexTip && pinkyTip) center = (I + P + indexTip->world.translate + pinkyTip->world.translate) * 0.25f;
 		RE::NiPoint3 B = cfg.style == 2 ? knuckles : fist;   // blades
 		RE::NiPoint3 U = cfg.style == 2 ? fist : across;     // handle bar
-		if (cfg.twist != 0.0f) U = Rotate(U, B, cfg.twist * d2r);
-		if (cfg.yaw != 0.0f) B = Rotate(B, U, cfg.yaw * d2r);
+		if (cfg.twist != 0.0f) U = Rotate(U, B, mirror * cfg.twist * d2r);
+		if (cfg.yaw != 0.0f) B = Rotate(B, U, mirror * cfg.yaw * d2r);
 		if (cfg.tilt != 0.0f) {
-			const RE::NiPoint3 side = Normalized(Cross(B, U));
-			B = Rotate(B, side, cfg.tilt * d2r);
-			U = Rotate(U, side, cfg.tilt * d2r);
+			const RE::NiPoint3 side = Normalized(Cross(B, U)) * mirror;
+			B = Rotate(B, side, mirror * cfg.tilt * d2r);
+			U = Rotate(U, side, mirror * cfg.tilt * d2r);
 		}
 		B = Normalized(B);
 		U = Normalized(U - B * U.Dot(B));
-		const RE::NiPoint3 Y = Normalized(Cross(B, U));
+		const RE::NiPoint3 Y = Normalized(Cross(B, U));  // the sword is symmetric through its thickness, so no true mirror is needed
 		RE::NiMatrix3 R;  // mesh X = bar, Y = across, Z = blades
 		for (int r = 0; r < 3; ++r) {
 			R.entry[r][0] = (&U.x)[r];
@@ -251,7 +265,7 @@ namespace ES
 		}
 		RE::NiTransform desired;
 		desired.rotate = R;
-		desired.translate = center + U * cfg.gripX + Y * cfg.gripY + B * cfg.gripZ;
+		desired.translate = center + U * cfg.gripX + Y * (cfg.gripY * mirror) + B * cfg.gripZ;
 		desired.scale = node->world.scale;
 		RE::NiTransform local = node->parent->world.Invert() * desired;
 		local.scale = node->local.scale;
@@ -260,18 +274,56 @@ namespace ES
 		node->Update(ud);
 	}
 
+	// First person: lift the arms a little while the sword is out. Moves both collarbones (not the spine,
+	// which would carry the first-person camera up with it).
+	struct Raised
+	{
+		RE::NiPoint3 base{}, set{};
+	};
+	inline std::unordered_map<RE::NiAVObject*, Raised> raised;
+
+	static void RaiseArms(RE::NiAVObject* root)
+	{
+		if (!root || (cfg.raise == 0.0f && cfg.forward == 0.0f)) return;
+		auto cam = RE::PlayerCamera::GetSingleton();
+		if (!cam || !cam->cameraRoot) return;
+		const auto&        camRot = cam->cameraRoot->world.rotate;
+		const RE::NiPoint3 worldOffset = RE::NiPoint3{ camRot.entry[0][2], camRot.entry[1][2], camRot.entry[2][2] } * cfg.raise +
+		                                 RE::NiPoint3{ camRot.entry[0][1], camRot.entry[1][1], camRot.entry[2][1] } * cfg.forward;
+		for (const char* name : { "NPC R Clavicle [RClv]", "NPC L Clavicle [LClv]" }) {
+			auto bone = root->GetObjectByName(RE::BSFixedString(name));
+			if (!bone || !bone->parent) continue;
+			auto& r = raised[bone];
+			// animation normally rewrites the bone every frame; if it didn't, don't stack the offset again
+			if (bone->local.translate != r.set) r.base = bone->local.translate;
+			const auto&        pw = bone->parent->world;
+			const RE::NiPoint3 localOffset = (pw.rotate.Transpose() * worldOffset) / (pw.scale != 0.0f ? pw.scale : 1.0f);
+			bone->local.translate = r.base + localOffset;
+			r.set = bone->local.translate;
+			RE::NiUpdateData ud;
+			bone->Update(ud);
+		}
+	}
+
 	static void OnFrame()
 	{
 		if (!cfg.alignGrip || !sword) return;
 		auto player = RE::PlayerCharacter::GetSingleton();
 		if (!player || !player->AsActorState()->IsWeaponDrawn()) {
 			baseLocal.clear();  // re-drawn swords are fresh nodes
+			raised.clear();
 			return;
 		}
-		auto right = player->GetEquippedObject(false);
-		if (right != sword) return;
-		AlignIn(player->Get3D(true), 0);   // first person
-		AlignIn(player->Get3D(false), 1);  // third person
+		const bool right = player->GetEquippedObject(false) == sword;
+		const bool left = player->GetEquippedObject(true) == sword;
+		if (!right && !left) return;
+		auto cam = RE::PlayerCamera::GetSingleton();
+		if (cam && cam->IsInFirstPerson()) RaiseArms(player->Get3D(true));
+		for (bool l : { false, true }) {
+			if (l ? !left : !right) continue;
+			AlignIn(player->Get3D(true), 0, l);   // first person
+			AlignIn(player->Get3D(false), 1, l);  // third person
+		}
 	}
 
 	static void Notify(const char* msg)
